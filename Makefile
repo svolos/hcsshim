@@ -1,4 +1,5 @@
 BASE:=base.tar.gz
+#BASE:=/mnt/c/ContainerPlat/LinuxBootFiles/core-image-minimal-lcow.tar
 DEV_BUILD:=0
 
 GO:=go
@@ -73,6 +74,8 @@ out/delta-dev.tar.gz: out/delta.tar.gz bin/internal/tools/snp-report
 out/delta.tar.gz: bin/init bin/vsockexec bin/cmd/gcs bin/cmd/gcstools bin/cmd/hooks/wait-paths Makefile
 	@mkdir -p out
 	rm -rf rootfs
+	mkdir -p rootfs/usr/bin/
+	mkdir -p rootfs/usr/sbin/
 	mkdir -p rootfs/bin/
 	mkdir -p rootfs/info/
 	cp bin/init rootfs/
@@ -80,6 +83,11 @@ out/delta.tar.gz: bin/init bin/vsockexec bin/cmd/gcs bin/cmd/gcstools bin/cmd/ho
 	cp bin/cmd/gcs rootfs/bin/
 	cp bin/cmd/gcstools rootfs/bin/
 	cp bin/cmd/hooks/wait-paths rootfs/bin/
+	cp /mnt/c/Users/svolos/Downloads/dm-maurice rootfs/bin
+	cp /mnt/c/Users/svolos/Downloads/fusermount3 rootfs/usr/bin
+	cp /mnt/c/Users/svolos/Downloads/mount.fuse3 rootfs/usr/sbin
+	cp /mnt/c/tmp/vsock rootfs/bin
+
 	for tool in $(GCS_TOOLS); do ln -s gcstools rootfs/bin/$$tool; done
 	git -C $(SRCROOT) rev-parse HEAD > rootfs/info/gcs.commit && \
 	git -C $(SRCROOT) rev-parse --abbrev-ref HEAD > rootfs/info/gcs.branch && \

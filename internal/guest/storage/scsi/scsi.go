@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -158,31 +159,46 @@ func mount(
 	}
 
 	if encrypted {
-		encryptedSource, err := crypt.EncryptDevice(spnCtx, source)
+		encryptedSource, err := crypt.EncryptDevice_v2(spnCtx, source)
 		if err != nil {
 			return errors.Wrapf(err, "failed to mount encrypted device: "+source)
 		}
 		source = encryptedSource
+
+		// mount the encrypted device file's filesystem
+		formatArgs := []string{
+			"-t", "ext4",
+			source,
+			target,
+		}
+		cmd := exec.Command("mount", formatArgs...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return errors.Wrapf(err, "failed to mount ext4: %s", string(output))
+		}
+	} else {
+		for {
+			if err := unixMount(source, target, "ext4", flags, data); err != nil {
+				// The `source` found by controllerLunToName can take some time
+				// before its actually available under `/dev/sd*`. Retry while we
+				// wait for `source` to show up.
+				if err == unix.ENOENT {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					default:
+						time.Sleep(10 * time.Millisecond)
+						continue
+					}
+				}
+				log.G(ctx).Debug("unixMount error: ", err.Error())
+				return err
+			}
+			break
+		}
 	}
 
-	for {
-		if err := unixMount(source, target, "ext4", flags, data); err != nil {
-			// The `source` found by controllerLunToName can take some time
-			// before its actually available under `/dev/sd*`. Retry while we
-			// wait for `source` to show up.
-			if err == unix.ENOENT {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-			}
-			return err
-		}
-		break
-	}
+	log.G(ctx).Debug("Device source: ", source, " mounted at ", target)
 
 	// remount the target to account for propagation flags
 	_, pgFlags, _ := storage.ParseMountOptions(options)
@@ -193,6 +209,8 @@ func mount(
 			}
 		}
 	}
+
+	log.G(ctx).Debug("Completed. Device source: ", source, " mounted at ", target)
 
 	return nil
 }

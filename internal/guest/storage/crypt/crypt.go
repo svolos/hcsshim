@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/pkg/errors"
@@ -239,6 +240,110 @@ func EncryptDevice(ctx context.Context, source string) (path string, err error) 
 		return "", errors.Wrap(err, "failed to do sparse copy")
 	}
 
+	return deviceNamePath, nil
+}
+
+// String used to identify dm-maurice devices. The argument is a unique name based
+// on the original block device path.
+const mauriceDeviceTemplate string = "dm-maurice-%s"
+
+// check if a device id ready by executing fdisk
+func checkDeviceReady(done chan string, destination string) {
+	cmd := exec.Command("fdisk", "-l", destination)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// the device is not ready. sleep for one second before trying again
+		time.Sleep(time.Second)
+		checkDeviceReady(done, destination)
+	}
+	// send a message on the channel
+	done <- string(output)
+}
+
+// mauriceCommand runs "dm-maurice" with the right arguments
+func mauriceCommand(ctx context.Context, source string, destination string) error {
+	// create the destination device file
+	cmd := exec.Command("touch", destination)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to create virtual device file: %s", string(output))
+	}
+	// format dm-maurice args and command
+	formatArgs := []string{
+		"--foreground",
+		"-u", source,
+		"-b", "4096",
+		"-m", destination,
+	}
+	cmd = exec.Command("/bin/dm-maurice", formatArgs...)
+	// execute asynchronously
+	if err := cmd.Start(); err != nil {
+		return errors.Wrapf(err, "/bin/dm-maurice failed to start")
+	}
+	log.G(ctx).Debug("Executing command: /bin/dm-maurice ",
+		formatArgs[0], formatArgs[1], formatArgs[2], formatArgs[3], formatArgs[4], formatArgs[5])
+
+	// create a channel over which we check if the device is ready
+	// and timeout after fifteen seconds
+	timeout := 15 * time.Second
+	done := make(chan string)
+	go checkDeviceReady(done, destination)
+	select {
+	case <-time.After(timeout):
+		return errors.Wrapf(err, "failed to create virtual device after waiting for 15 seconds")
+	case res := <-done:
+		log.G(ctx).Debug("Executed /bin/dm-maurice. Device: ", res)
+	}
+	return nil
+}
+
+func cleanupMaurice(deviceNamePath string) error {
+	formatArgs := []string{
+		"-u", deviceNamePath,
+	}
+	cmd := exec.Command("/usr/bin/fusermount3", formatArgs...)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "failed to execute dm-maurice: %s", string(output))
+	}
+
+	return nil
+}
+
+func EncryptDevice_v2(ctx context.Context, source string) (path string, err error) {
+
+	uniqueName, err := getUniqueName(source)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to generate unique name: %s", source)
+	}
+
+	// Create and Open the device using dm-maurice
+	deviceName := fmt.Sprintf(mauriceDeviceTemplate, uniqueName)
+	deviceNamePath := "/media/" + deviceName
+
+	log.G(ctx).Debug("Creating virtual device: ", deviceNamePath)
+
+	if err = mauriceCommand(ctx, source, deviceNamePath); err != nil {
+		return "", errors.Wrapf(err, "dm-maurice failed: %s", source)
+	}
+
+	defer func() {
+		if err != nil {
+			if inErr := cleanupMaurice(deviceNamePath); inErr != nil {
+				log.G(ctx).WithError(inErr).Debug("failed to cleanup dm-maurice device")
+			}
+		}
+	}()
+
+	log.G(ctx).Debug("Formatting virtual device: ", deviceNamePath)
+
+	// Format the device as ext4
+	if err = _mkfsExt4Command([]string{deviceNamePath}); err != nil {
+		return "", errors.Wrapf(err, "mkfs.ext4 failed to format: %s", deviceNamePath)
+	}
+
+	log.G(ctx).Debug("virtual device is ready: ", deviceNamePath)
 	return deviceNamePath, nil
 }
 
